@@ -2,11 +2,11 @@ package dnshandler
 
 import (
 	"bufio"
-	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 
 	"github.com/miekg/dns"
 )
@@ -14,23 +14,27 @@ import (
 const (
 	upstreamDNS = "1.1.1.1:53"
 	listenAddr  = ":53"
-	// management server address
-	mgmtAddr    = ":8080"
 	blacklistFn = "data/blacklist.txt"
 )
 
 type DNSHandler struct {
-	mu        sync.RWMutex
-	blacklist map[string]bool
+	blacklist atomic.Value // stores map[string]bool
 	Client    *dns.Client
 }
 
-// loadBlacklist reads domains from the file and stores them in memory
-func (h *DNSHandler) LoadBlacklist() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+func NewDNSHandler() *DNSHandler {
+	h := &DNSHandler{
+		Client: &dns.Client{
+			Net:            "udp",
+			SingleInflight: true, // Prevents duplicate upstream queries for the same domain
+		},
+	}
+	h.blacklist.Store(make(map[string]bool))
+	return h
+}
 
-	h.blacklist = make(map[string]bool)
+// LoadBlacklist reads domains from the file and atomically swaps the memory pointer
+func (h *DNSHandler) LoadBlacklist() {
 	file, err := os.Open(blacklistFn)
 	if err != nil {
 		log.Printf("%s not found. Starting with empty blacklist.", blacklistFn)
@@ -38,6 +42,7 @@ func (h *DNSHandler) LoadBlacklist() {
 	}
 	defer file.Close()
 
+	newMap := make(map[string]bool)
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -49,27 +54,29 @@ func (h *DNSHandler) LoadBlacklist() {
 		if !strings.HasSuffix(domain, ".") {
 			domain += "."
 		}
-		h.blacklist[domain] = true
+		newMap[domain] = true
 	}
-	log.Printf("[MEM] Loaded %d blocked domains into memory.", len(h.blacklist))
+
+	h.blacklist.Store(newMap)
 }
 
 // isBlocked checks if a domain or any of its parent domains are blacklisted
 func (h *DNSHandler) isBlocked(qName string) bool {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
+	blacklist := h.blacklist.Load().(map[string]bool)
 
 	// check exact match (e.g. doubleclick.net.)
-	if h.blacklist[qName] {
+	if blacklist[qName] {
 		return true
 	}
 
-	// check parent domains (e.g. video.ads.doubleclick.net.)
-	labels := dns.SplitDomainName(qName)
-	for i := 1; i < len(labels); i++ {
-		parent := strings.Join(labels[i:], ".") + "."
-		if h.blacklist[parent] {
-			return true
+	// zero allocation parent scanning (e.g., "video.ads.doubleclick.net.")
+	// slice the existing string instead of splitting/joining.
+	for i := 0; i < len(qName)-1; i++ {
+		if qName[i] == '.' {
+			parent := qName[i+1:]
+			if blacklist[parent] {
+				return true
+			}
 		}
 	}
 
@@ -77,11 +84,9 @@ func (h *DNSHandler) isBlocked(qName string) bool {
 }
 
 func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	msg := new(dns.Msg)
-	msg.SetReply(r)
-	msg.Authoritative = true
-
 	if len(r.Question) == 0 {
+		msg := new(dns.Msg)
+		msg.SetReply(r)
 		w.WriteMsg(msg)
 		return
 	}
@@ -89,34 +94,54 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	question := r.Question[0]
 	qName := strings.ToLower(question.Name)
 
-	// wildcard/subdomain matching
+	// handle reverse DNS lookup (PTR records)
+	if question.Qtype == dns.TypePTR && qName == "1.0.0.127.in-addr.arpa." {
+		msg := new(dns.Msg)
+		msg.SetReply(r)
+		msg.Authoritative = true
+
+		serverName := "sojeb-dns."
+
+		msg.Answer = append(msg.Answer, &dns.PTR{
+			Hdr: dns.RR_Header{
+				Name:   question.Name,
+				Rrtype: dns.TypePTR,
+				Class:  dns.ClassINET,
+				Ttl:    60,
+			},
+			Ptr: serverName,
+		})
+		w.WriteMsg(msg)
+		return
+	}
+
 	if h.isBlocked(qName) {
-		if question.Qtype == dns.TypeA {
-			log.Printf("BLOCKED (IPv4): %s", qName)
-			rr, err := dns.NewRR(fmt.Sprintf("%s 60 IN A 0.0.0.0", qName))
-			if err == nil {
-				msg.Answer = append(msg.Answer, rr)
-			}
+		msg := new(dns.Msg)
+		msg.SetReply(r)
+		msg.Authoritative = true
+
+		switch question.Qtype {
+		case dns.TypeA:
+			msg.Answer = append(msg.Answer, &dns.A{
+				Hdr: dns.RR_Header{Name: question.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				A:   net.IPv4zero, // 0.0.0.0
+			})
 			w.WriteMsg(msg)
 			return
-		}
 
-		if question.Qtype == dns.TypeAAAA {
-			log.Printf("BLOCKED (IPv6): %s", qName)
-			rr, err := dns.NewRR(fmt.Sprintf("%s 60 IN AAAA ::", qName))
-			if err == nil {
-				msg.Answer = append(msg.Answer, rr)
-			}
+		case dns.TypeAAAA:
+			msg.Answer = append(msg.Answer, &dns.AAAA{
+				Hdr:  dns.RR_Header{Name: question.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60},
+				AAAA: net.IPv6zero, // ::
+			})
 			w.WriteMsg(msg)
 			return
 		}
 	}
 
-	// If not blocked, forward to upstream DNS using the shared client
-	log.Printf("ALLOWED: %s (Type %d)", qName, question.Qtype)
+	// Forward to upstream
 	response, _, err := h.Client.Exchange(r, upstreamDNS)
 	if err != nil {
-		log.Printf("Upstream error for %s: %v", qName, err)
 		dns.HandleFailed(w, r)
 		return
 	}
