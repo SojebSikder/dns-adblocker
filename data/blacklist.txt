@@ -1,0 +1,3 @@
+ads.doubleclick.net
+telemetry.host.com
+tracking.pixel.org
