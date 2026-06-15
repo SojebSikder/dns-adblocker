@@ -15,3 +15,9 @@ add `ads.doubleclick.net` to data/blacklist.txt and run this
 ```bash
 nslookup ads.doubleclick.net 127.0.0.1
 ```
+
+
+## TODO
+- in-meomry inbound response caching
+- connection pooling
+- use radix/trie for efficient lookups blacklist

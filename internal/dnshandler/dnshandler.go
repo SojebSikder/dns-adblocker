@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/miekg/dns"
@@ -16,6 +17,10 @@ const (
 	listenAddr  = ":53"
 	blacklistFn = "data/blacklist.txt"
 )
+
+var msgPool = sync.Pool{
+	New: func() interface{} { return new(dns.Msg) },
+}
 
 type DNSHandler struct {
 	blacklist atomic.Value // stores map[string]bool
@@ -85,7 +90,10 @@ func (h *DNSHandler) isBlocked(qName string) bool {
 
 func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if len(r.Question) == 0 {
-		msg := new(dns.Msg)
+		msg := msgPool.Get().(*dns.Msg)
+		*msg = dns.Msg{} // Clear old data
+		defer msgPool.Put(msg)
+
 		msg.SetReply(r)
 		w.WriteMsg(msg)
 		return
@@ -96,7 +104,10 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	// handle reverse DNS lookup (PTR records)
 	if question.Qtype == dns.TypePTR && qName == "1.0.0.127.in-addr.arpa." {
-		msg := new(dns.Msg)
+		msg := msgPool.Get().(*dns.Msg)
+		*msg = dns.Msg{} // Clear old data
+		defer msgPool.Put(msg)
+
 		msg.SetReply(r)
 		msg.Authoritative = true
 
@@ -116,7 +127,10 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	if h.isBlocked(qName) {
-		msg := new(dns.Msg)
+		msg := msgPool.Get().(*dns.Msg)
+		*msg = dns.Msg{} // Clear old data
+		defer msgPool.Put(msg)
+
 		msg.SetReply(r)
 		msg.Authoritative = true
 
