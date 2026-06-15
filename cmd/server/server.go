@@ -38,7 +38,7 @@ func startServer() {
 		Handler: Handler,
 	}
 
-	log.Printf("[DNS] Go DNS Ad Blocker listening on %s...", listenAddr)
+	log.Printf("[DNS] DNS AdBlocker listening on %s...", listenAddr)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to start server: %s\nNote: You might need sudo/administrator privileges to bind to port 53.", err)
 	}
