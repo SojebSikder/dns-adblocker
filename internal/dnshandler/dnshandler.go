@@ -2,13 +2,16 @@ package dnshandler
 
 import (
 	"bufio"
+	"context"
 	"log"
 	"net"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/allegro/bigcache/v3"
 	"github.com/miekg/dns"
 )
 
@@ -25,14 +28,27 @@ var msgPool = sync.Pool{
 type DNSHandler struct {
 	blacklist atomic.Value // stores map[string]bool
 	Client    *dns.Client
+	cache     *bigcache.BigCache
 }
 
 func NewDNSHandler() *DNSHandler {
+	// initialize BigCache config
+	config := bigcache.DefaultConfig(5 * time.Minute) // cache extries expire after 5 mins
+	config.CleanWindow = 1 * time.Minute
+	config.Shards = 1024
+	config.Verbose = false
+
+	cache, err := bigcache.New(context.Background(), config)
+	if err != nil {
+		log.Fatalf("Failed to initialize bigcache: %v", err)
+	}
+
 	h := &DNSHandler{
 		Client: &dns.Client{
 			Net:            "udp",
 			SingleInflight: true, // Prevents duplicate upstream queries for the same domain
 		},
+		cache: cache,
 	}
 	h.blacklist.Store(make(map[string]bool))
 	return h
@@ -74,7 +90,7 @@ func (h *DNSHandler) isBlocked(qName string) bool {
 		return true
 	}
 
-	// zero allocation parent scanning (e.g., "video.ads.doubleclick.net.")
+	// zero allocation parent scanning (e.g. "video.ads.doubleclick.net.")
 	// slice the existing string instead of splitting/joining.
 	for i := 0; i < len(qName)-1; i++ {
 		if qName[i] == '.' {
@@ -150,6 +166,27 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 			})
 			w.WriteMsg(msg)
 			return
+
+		default:
+			// prevent fall-through for other types (TXT, MX, etc.)
+			// return NOERROR response with an empty answer section
+			w.WriteMsg(msg)
+			return
+
+		}
+	}
+
+	cacheKey := string(dns.TypeToString[question.Qtype]) + ":" + qName
+
+	if cachedBytes, err := h.cache.Get(cacheKey); err == nil {
+		cachedMsg := msgPool.Get().(*dns.Msg)
+		*cachedMsg = dns.Msg{}
+		defer msgPool.Put(cachedMsg)
+
+		if err := cachedMsg.Unpack(cachedBytes); err == nil {
+			cachedMsg.Id = r.Id
+			w.WriteMsg(cachedMsg)
+			return
 		}
 	}
 
@@ -161,4 +198,11 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	w.WriteMsg(response)
+
+	// save to cache
+	if response.Rcode == dns.RcodeSuccess || response.Rcode == dns.RcodeNameError {
+		if packed, err := response.Pack(); err == nil {
+			_ = h.cache.Set(cacheKey, packed)
+		}
+	}
 }

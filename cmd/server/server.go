@@ -22,11 +22,13 @@ var ServerCmd = &cobra.Command{
 	},
 }
 
-var Handler = &dnshandler.DNSHandler{
-	Client: &dns.Client{Timeout: 2 * time.Second},
-}
+var Handler *dnshandler.DNSHandler
 
 func startServer() {
+
+	Handler = dnshandler.NewDNSHandler()
+	Handler.Client.Timeout = 2 * time.Second
+
 	Handler.LoadBlacklist()
 
 	// Start HTTP Server for Hot-Reloading

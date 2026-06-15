@@ -18,6 +18,5 @@ nslookup ads.doubleclick.net 127.0.0.1
 
 
 ## TODO
-- in-meomry inbound response caching
 - connection pooling
 - use radix/trie for efficient lookups blacklist
