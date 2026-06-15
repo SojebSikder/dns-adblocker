@@ -2,7 +2,13 @@
 
 DNS Adblocker used to block ads, malicious links, unwanted sites and etc..
 
-# Testing
+## Run
+
+```bash
+dns-adblocker server
+```
+
+## Testing
 
 add `ads.doubleclick.net` to blacklist.txt and run this
 

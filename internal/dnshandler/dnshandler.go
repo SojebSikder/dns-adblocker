@@ -1,14 +1,12 @@
-package main
+package dnshandler
 
 import (
 	"bufio"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/miekg/dns"
 )
@@ -16,18 +14,19 @@ import (
 const (
 	upstreamDNS = "1.1.1.1:53"
 	listenAddr  = ":53"
-	mgmtAddr    = "127.0.0.1:8080" // Port for hot-reloading
+	// management server address
+	mgmtAddr    = ":8080"
 	blacklistFn = "data/blacklist.txt"
 )
 
 type DNSHandler struct {
 	mu        sync.RWMutex
 	blacklist map[string]bool
-	client    *dns.Client
+	Client    *dns.Client
 }
 
 // loadBlacklist reads domains from the file and stores them in memory
-func (h *DNSHandler) loadBlacklist() {
+func (h *DNSHandler) LoadBlacklist() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -115,7 +114,7 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	// If not blocked, forward to upstream DNS using the shared client
 	log.Printf("ALLOWED: %s (Type %d)", qName, question.Qtype)
-	response, _, err := h.client.Exchange(r, upstreamDNS)
+	response, _, err := h.Client.Exchange(r, upstreamDNS)
 	if err != nil {
 		log.Printf("Upstream error for %s: %v", qName, err)
 		dns.HandleFailed(w, r)
@@ -123,34 +122,4 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	w.WriteMsg(response)
-}
-
-func main() {
-	handler := &DNSHandler{
-		client: &dns.Client{Timeout: 2 * time.Second},
-	}
-	handler.loadBlacklist()
-
-	// Start HTTP Server for Hot-Reloading
-	go func() {
-		http.HandleFunc("/reload", func(w http.ResponseWriter, r *http.Request) {
-			handler.loadBlacklist()
-			fmt.Fprintln(w, "Blacklist reloaded successfully!")
-		})
-		log.Printf("[MGMT] Admin server listening on http://%s/reload", mgmtAddr)
-		if err := http.ListenAndServe(mgmtAddr, nil); err != nil {
-			log.Printf("Failed to start admin server: %v", err)
-		}
-	}()
-
-	server := &dns.Server{
-		Addr:    listenAddr,
-		Net:     "udp",
-		Handler: handler,
-	}
-
-	log.Printf("[DNS] Go DNS Ad Blocker listening on %s...", listenAddr)
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("Failed to start server: %s\nNote: You might need sudo/administrator privileges to bind to port 53.", err)
-	}
 }
