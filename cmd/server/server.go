@@ -6,7 +6,6 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/sojebsikder/dns-adblocker/internal/dnshandler"
-	"github.com/sojebsikder/dns-adblocker/internal/management"
 	"github.com/spf13/cobra"
 )
 
@@ -23,20 +22,20 @@ var ServerCmd = &cobra.Command{
 	},
 }
 
-func startServer() {
-	handler := &dnshandler.DNSHandler{
-		Client: &dns.Client{Timeout: 2 * time.Second},
-	}
+var Handler = &dnshandler.DNSHandler{
+	Client: &dns.Client{Timeout: 2 * time.Second},
+}
 
-	handler.LoadBlacklist()
+func startServer() {
+	Handler.LoadBlacklist()
 
 	// Start HTTP Server for Hot-Reloading
-	management.StartManagementServer(mgmtAddr, handler)
+	// management.StartManagementServer(mgmtAddr, Handler)
 
 	server := &dns.Server{
 		Addr:    listenAddr,
 		Net:     "udp",
-		Handler: handler,
+		Handler: Handler,
 	}
 
 	log.Printf("[DNS] Go DNS Ad Blocker listening on %s...", listenAddr)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/sojebsikder/dns-adblocker/cmd/reload"
 	"github.com/sojebsikder/dns-adblocker/cmd/server"
 	"github.com/spf13/cobra"
 )
@@ -18,6 +19,7 @@ var RootCmd = &cobra.Command{
 
 func main() {
 	RootCmd.AddCommand(server.ServerCmd)
+	RootCmd.AddCommand(reload.ReloadCmd)
 	RootCmd.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose output")
 
 	if err := RootCmd.Execute(); err != nil {

@@ -10,7 +10,7 @@ dns-adblocker server
 
 ## Testing
 
-add `ads.doubleclick.net` to blacklist.txt and run this
+add `ads.doubleclick.net` to data/blacklist.txt and run this
 
 ```bash
 nslookup ads.doubleclick.net 127.0.0.1
