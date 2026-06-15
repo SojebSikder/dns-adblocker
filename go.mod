@@ -3,6 +3,7 @@ module github.com/sojebsikder/dns-adblocker
 go 1.26.3
 
 require (
+	github.com/allegro/bigcache/v3 v3.1.0
 	github.com/miekg/dns v1.1.72
 	github.com/spf13/cobra v1.10.2
 )
