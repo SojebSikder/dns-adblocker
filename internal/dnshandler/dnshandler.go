@@ -21,13 +21,10 @@ const (
 	blacklistFn = "data/blacklist.txt"
 )
 
-var msgPool = sync.Pool{
-	New: func() interface{} { return new(dns.Msg) },
-}
-
 type DNSHandler struct {
 	blacklist atomic.Value // stores map[string]bool
 	Client    *dns.Client
+	msgPool   sync.Pool
 	cache     *bigcache.BigCache
 }
 
@@ -47,6 +44,9 @@ func NewDNSHandler() *DNSHandler {
 		Client: &dns.Client{
 			Net:            "udp",
 			SingleInflight: true, // Prevents duplicate upstream queries for the same domain
+		},
+		msgPool: sync.Pool{
+			New: func() interface{} { return new(dns.Msg) },
 		},
 		cache: cache,
 	}
@@ -106,9 +106,9 @@ func (h *DNSHandler) isBlocked(qName string) bool {
 
 func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	if len(r.Question) == 0 {
-		msg := msgPool.Get().(*dns.Msg)
+		msg := h.msgPool.Get().(*dns.Msg)
 		*msg = dns.Msg{} // Clear old data
-		defer msgPool.Put(msg)
+		defer h.msgPool.Put(msg)
 
 		msg.SetReply(r)
 		w.WriteMsg(msg)
@@ -120,9 +120,9 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	// handle reverse DNS lookup (PTR records)
 	if question.Qtype == dns.TypePTR && qName == "1.0.0.127.in-addr.arpa." {
-		msg := msgPool.Get().(*dns.Msg)
+		msg := h.msgPool.Get().(*dns.Msg)
 		*msg = dns.Msg{} // Clear old data
-		defer msgPool.Put(msg)
+		defer h.msgPool.Put(msg)
 
 		msg.SetReply(r)
 		msg.Authoritative = true
@@ -143,9 +143,9 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	}
 
 	if h.isBlocked(qName) {
-		msg := msgPool.Get().(*dns.Msg)
+		msg := h.msgPool.Get().(*dns.Msg)
 		*msg = dns.Msg{} // Clear old data
-		defer msgPool.Put(msg)
+		defer h.msgPool.Put(msg)
 
 		msg.SetReply(r)
 		msg.Authoritative = true
@@ -179,9 +179,9 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	cacheKey := string(dns.TypeToString[question.Qtype]) + ":" + qName
 
 	if cachedBytes, err := h.cache.Get(cacheKey); err == nil {
-		cachedMsg := msgPool.Get().(*dns.Msg)
+		cachedMsg := h.msgPool.Get().(*dns.Msg)
 		*cachedMsg = dns.Msg{}
-		defer msgPool.Put(cachedMsg)
+		defer h.msgPool.Put(cachedMsg)
 
 		if err := cachedMsg.Unpack(cachedBytes); err == nil {
 			cachedMsg.Id = r.Id
