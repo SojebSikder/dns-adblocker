@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -15,12 +16,14 @@ import (
 const (
 	upstreamDNS = "1.1.1.1:53"
 	listenAddr  = ":53"
+	mgmtAddr    = "127.0.0.1:8080" // Port for hot-reloading
 	blacklistFn = "data/blacklist.txt"
 )
 
 type DNSHandler struct {
 	mu        sync.RWMutex
 	blacklist map[string]bool
+	client    *dns.Client
 }
 
 // loadBlacklist reads domains from the file and stores them in memory
@@ -42,14 +45,36 @@ func (h *DNSHandler) loadBlacklist() {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// DNS names always end with a dot internally (e.g., "google.com.")
+
 		domain := strings.ToLower(line)
 		if !strings.HasSuffix(domain, ".") {
 			domain += "."
 		}
 		h.blacklist[domain] = true
 	}
-	log.Printf("Loaded %d blocked domains into memory.", len(h.blacklist))
+	log.Printf("[MEM] Loaded %d blocked domains into memory.", len(h.blacklist))
+}
+
+// isBlocked checks if a domain or any of its parent domains are blacklisted
+func (h *DNSHandler) isBlocked(qName string) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	// check exact match (e.g. doubleclick.net.)
+	if h.blacklist[qName] {
+		return true
+	}
+
+	// check parent domains (e.g. video.ads.doubleclick.net.)
+	labels := dns.SplitDomainName(qName)
+	for i := 1; i < len(labels); i++ {
+		parent := strings.Join(labels[i:], ".") + "."
+		if h.blacklist[parent] {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
@@ -57,7 +82,6 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	msg.SetReply(r)
 	msg.Authoritative = true
 
-	// Ensure there is at least one question in the DNS packet
 	if len(r.Question) == 0 {
 		w.WriteMsg(msg)
 		return
@@ -66,50 +90,58 @@ func (h *DNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	question := r.Question[0]
 	qName := strings.ToLower(question.Name)
 
-	h.mu.RLock()
-	isBlocked := h.blacklist[qName]
-	h.mu.RUnlock()
-
-	// Block standard IPv4 (A) requests if they match the blacklist
-	if isBlocked {
+	// wildcard/subdomain matching
+	if h.isBlocked(qName) {
 		if question.Qtype == dns.TypeA {
-			log.Printf("BLOCKED: %s", qName)
-
-			// Spoof response with 0.0.0.0
+			log.Printf("BLOCKED (IPv4): %s", qName)
 			rr, err := dns.NewRR(fmt.Sprintf("%s 60 IN A 0.0.0.0", qName))
 			if err == nil {
 				msg.Answer = append(msg.Answer, rr)
 			}
-		} else if question.Qtype == dns.TypeAAAA {
-			log.Printf("BLOCKED: %s", qName)
+			w.WriteMsg(msg)
+			return
+		}
 
-			// Spoof response with ::
+		if question.Qtype == dns.TypeAAAA {
+			log.Printf("BLOCKED (IPv6): %s", qName)
 			rr, err := dns.NewRR(fmt.Sprintf("%s 60 IN AAAA ::", qName))
 			if err == nil {
 				msg.Answer = append(msg.Answer, rr)
 			}
+			w.WriteMsg(msg)
+			return
 		}
-		w.WriteMsg(msg)
-		return
 	}
 
-	// If not blocked, forward to upstream DNS
-	log.Printf("ALLOWED: %s", qName)
-	client := &dns.Client{Timeout: 2 * time.Second}
-	response, _, err := client.Exchange(r, upstreamDNS)
+	// If not blocked, forward to upstream DNS using the shared client
+	log.Printf("ALLOWED: %s (Type %d)", qName, question.Qtype)
+	response, _, err := h.client.Exchange(r, upstreamDNS)
 	if err != nil {
 		log.Printf("Upstream error for %s: %v", qName, err)
 		dns.HandleFailed(w, r)
 		return
 	}
 
-	// Send the upstream response back to the client
 	w.WriteMsg(response)
 }
 
 func main() {
-	handler := &DNSHandler{}
+	handler := &DNSHandler{
+		client: &dns.Client{Timeout: 2 * time.Second},
+	}
 	handler.loadBlacklist()
+
+	// Start HTTP Server for Hot-Reloading
+	go func() {
+		http.HandleFunc("/reload", func(w http.ResponseWriter, r *http.Request) {
+			handler.loadBlacklist()
+			fmt.Fprintln(w, "Blacklist reloaded successfully!")
+		})
+		log.Printf("[MGMT] Admin server listening on http://%s/reload", mgmtAddr)
+		if err := http.ListenAndServe(mgmtAddr, nil); err != nil {
+			log.Printf("Failed to start admin server: %v", err)
+		}
+	}()
 
 	server := &dns.Server{
 		Addr:    listenAddr,
@@ -117,7 +149,7 @@ func main() {
 		Handler: handler,
 	}
 
-	log.Printf("Go DNS Ad Blocker listening on %s...", listenAddr)
+	log.Printf("[DNS] Go DNS Ad Blocker listening on %s...", listenAddr)
 	if err := server.ListenAndServe(); err != nil {
 		log.Fatalf("Failed to start server: %s\nNote: You might need sudo/administrator privileges to bind to port 53.", err)
 	}
